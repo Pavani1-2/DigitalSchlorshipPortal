@@ -1,0 +1,16 @@
+
+# Java / Maven backend
+backend/target/
+*.class
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+application-local.properties
+
+# IDE files
+*.iml
+
+# Local database backups
+*.sql.gz
