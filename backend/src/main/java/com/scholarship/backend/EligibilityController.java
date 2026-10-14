@@ -1,4 +1,3 @@
-
 package com.scholarship.backend;
 
 import java.math.BigDecimal;
@@ -7,10 +6,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -34,186 +31,332 @@ public class EligibilityController {
     public List<EligibilityResult> check(
             @RequestBody EligibilityRequest request) {
 
+        List<EligibilityResult> results = new ArrayList<>();
+
         if (request == null) {
-            return new ArrayList<>();
+            return results;
         }
 
-        return catalogRepository.findAll()
-                .stream()
-                .map(s -> evaluate(s, request))
-                .filter(EligibilityResult::isPotentialMatch)
-                .sorted(Comparator.comparing(
-                        EligibilityResult::getScholarshipName,
-                        Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)))
-                .collect(Collectors.toList());
+        for (ScholarshipCatalog scholarship : catalogRepository.findAll()) {
+            EligibilityResult result = evaluate(scholarship, request);
+
+            if (result.isPotentialMatch()) {
+                results.add(result);
+            }
+        }
+
+        results.sort(
+            Comparator.comparing(
+                EligibilityResult::getScholarshipName,
+                Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)
+            )
+        );
+
+        return results;
     }
 
     private EligibilityResult evaluate(
             ScholarshipCatalog scholarship,
             EligibilityRequest request) {
 
-        String criteria = lower(scholarship.getEligibility());
-        String category = lower(request.getCategory());
-        String state = lower(request.getState());
-        String course = lower(request.getCourse());
+        String criteria = normalize(scholarship.getEligibility());
+        String category = normalize(request.getCategory());
+        String state = normalize(request.getState());
+        String course = normalize(request.getCourse());
 
         List<String> reasons = new ArrayList<>();
         boolean match = true;
 
-        // 1. Check minimum percentage mentioned in the criteria.
-        Matcher marksMatcher = Pattern.compile(
-                "(\\d{1,3}(?:\\.\\d+)?)\\s*%")
-                .matcher(criteria);
+        // 1. Percentage validation and eligibility
+        Double percentage = request.getPercentage();
 
-        while (marksMatcher.find()) {
-            double minimumMarks;
-
-            try {
-                minimumMarks = Double.parseDouble(marksMatcher.group(1));
-            } catch (NumberFormatException ex) {
-                continue;
-            }
-
-            if (minimumMarks <= 0 || minimumMarks > 100) {
-                continue;
-            }
-
-            if (request.getPercentage() == null) {
+        if (percentage != null) {
+            if (percentage < 0 || percentage > 100) {
                 match = false;
-                reasons.add("Enter your percentage to verify the minimum marks.");
-                break;
-            }
+                reasons.add("Percentage must be between 0 and 100.");
+            } else {
+                Double minimumMarks = findMinimumPercentage(criteria);
 
-            if (request.getPercentage() < minimumMarks) {
-                match = false;
-                reasons.add("Your percentage is below the stated minimum of "
-                        + minimumMarks + "%.");
-                break;
-            }
-        }
-
-        // 2. Check an income limit stated in the eligibility text.
-        Matcher incomeMatcher = Pattern.compile(
-                "(?:annual\\s+family\\s+income|family\\s+income|annual\\s+income|income)"
-                + "[^0-9]{0,40}(?:rs\\.?\\s*|inr\\s*|₹\\s*)?"
-                + "([0-9][0-9,]*)",
-                Pattern.CASE_INSENSITIVE)
-                .matcher(criteria);
-
-        if (incomeMatcher.find()) {
-            try {
-                double incomeLimit = Double.parseDouble(
-                        incomeMatcher.group(1).replace(",", ""));
-
-                if (incomeLimit > 0) {
-                    if (request.getAnnualFamilyIncome() == null) {
+                if (minimumMarks != null) {
+                    if (percentage < minimumMarks) {
                         match = false;
-                        reasons.add("Enter annual family income to verify the limit.");
-                    } else if (request.getAnnualFamilyIncome() > incomeLimit) {
-                        match = false;
-                        reasons.add("Annual family income exceeds the stated limit.");
+                        reasons.add(
+                            "Minimum required percentage is "
+                            + minimumMarks + "%."
+                        );
                     } else {
-                        reasons.add("Annual family income is within the detected limit.");
+                        reasons.add(
+                            "Percentage meets the detected minimum of "
+                            + minimumMarks + "%."
+                        );
                     }
                 }
-            } catch (NumberFormatException ignored) {
-                // Ignore an income value that cannot be parsed.
             }
         }
 
-        // 3. Check explicit Telangana restriction.
-        if (criteria.contains("telangana")
-                && !state.isBlank()
-                && !state.contains("telangana")) {
-            match = false;
-            reasons.add("This criterion mentions Telangana, but your selected state differs.");
-        }
+        // 2. Annual family income
+        Double income = request.getAnnualFamilyIncome();
 
-        // 4. Check explicit SC/ST-only restrictions.
-        boolean scOnly = criteria.contains("sc/st")
-                || criteria.contains("sc or st")
-                || criteria.contains("scheduled caste")
-                || criteria.contains("scheduled tribe");
-
-        if (scOnly && criteria.contains("only") && !category.isBlank()) {
-            boolean categoryMatches =
-                    (category.equals("sc")
-                            && (criteria.contains("sc")
-                            || criteria.contains("scheduled caste")))
-                    || (category.equals("st")
-                            && (criteria.contains("st")
-                            || criteria.contains("scheduled tribe")));
-
-            if (!categoryMatches) {
+        if (income != null) {
+            if (income < 0) {
                 match = false;
-                reasons.add("The stated criteria may restrict this scholarship to SC/ST categories.");
+                reasons.add("Annual family income cannot be negative.");
+            } else {
+                Double incomeLimit = findIncomeLimit(criteria);
+
+                if (incomeLimit != null) {
+                    if (income > incomeLimit) {
+                        match = false;
+                        reasons.add(
+                            "Annual family income exceeds the detected limit of Rs. "
+                            + incomeLimit + "."
+                        );
+                    } else {
+                        reasons.add(
+                            "Annual family income is within the detected limit."
+                        );
+                    }
+                }
             }
         }
 
-        // 5. Check explicit undergraduate/postgraduate restrictions.
-        boolean asksForPG = criteria.contains("postgraduate")
-                || criteria.contains("post graduate")
-                || criteria.contains("post-graduate")
-                || criteria.contains("post-graduation")
-                || criteria.contains("master's degree")
-                || criteria.contains("masters degree")
-                || criteria.contains("m.tech")
-                || criteria.contains("m.e.")
-                || criteria.contains("mca")
-                || criteria.contains("mba");
+        // 3. Category restrictions
+        if (!category.isBlank()) {
+            boolean scOnly = criteria.contains("sc only")
+                    || criteria.contains("sc/st only")
+                    || criteria.contains("scheduled caste only");
 
-        boolean asksForUG = criteria.contains("undergraduate")
-                || criteria.contains("under graduate")
-                || criteria.contains("under-graduate")
-                || criteria.contains("b.tech")
-                || criteria.contains("b.e.")
-                || criteria.contains("bachelor's degree")
-                || criteria.contains("bachelors degree");
+            boolean stOnly = criteria.contains("st only")
+                    || criteria.contains("scheduled tribe only");
 
-        boolean studentIsPG = course.contains("m.tech")
-                || course.contains("m.e.")
-                || course.equals("mca")
-                || course.equals("mba")
-                || course.contains("postgraduate")
-                || course.contains("post graduate");
+            boolean obcOnly = criteria.contains("obc only")
+                    || criteria.contains("bc only")
+                    || criteria.contains("backward class only");
 
-        boolean studentIsUG = course.contains("b.tech")
-                || course.contains("b.e.")
-                || course.contains("bachelor")
-                || course.contains("undergraduate")
-                || course.contains("under graduate");
+            boolean generalOnly = criteria.contains("general category only")
+                    || criteria.contains("general candidates only");
 
-        if (asksForPG && studentIsUG) {
-            match = false;
-            reasons.add("The scholarship criteria indicate postgraduate study.");
-        } else if (asksForUG && studentIsPG) {
-            match = false;
-            reasons.add("The scholarship criteria indicate undergraduate study.");
+            if (scOnly && !category.equals("sc")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to SC.");
+            }
+
+            if (stOnly && !category.equals("st")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to ST.");
+            }
+
+            if (obcOnly
+                    && !category.equals("obc")
+                    && !category.equals("bc")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to OBC/BC.");
+            }
+
+            if (generalOnly
+                    && !category.equals("general")
+                    && !category.equals("open")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to General category.");
+            }
+        }
+
+        // 4. State restrictions
+        if (!state.isBlank()) {
+            if (criteria.contains("telangana only")
+                    && !state.equals("telangana")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to Telangana.");
+            }
+
+            if (criteria.contains("andhra pradesh only")
+                    && !state.equals("andhra pradesh")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to Andhra Pradesh.");
+            }
+        }
+
+        // 5. Course restrictions
+        if (!course.isBlank()) {
+            boolean studentIsPG = isPostgraduate(course);
+            boolean studentIsUG = isUndergraduate(course);
+
+            boolean ugOnly = criteria.contains("undergraduate only")
+                    || criteria.contains("under graduate only")
+                    || criteria.contains("ug students only");
+
+            boolean pgOnly = criteria.contains("postgraduate only")
+                    || criteria.contains("post graduate only")
+                    || criteria.contains("pg students only");
+
+            if (ugOnly && studentIsPG) {
+                match = false;
+                reasons.add(
+                    "This scholarship appears restricted to undergraduate students."
+                );
+            }
+
+            if (pgOnly && studentIsUG) {
+                match = false;
+                reasons.add(
+                    "This scholarship appears restricted to postgraduate students."
+                );
+            }
+
+            boolean eceOnly = criteria.contains("ece only")
+                    || criteria.contains("electronics and communication engineering only");
+
+            if (eceOnly
+                    && !course.contains("ece")
+                    && !course.contains("electronics and communication")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to ECE.");
+            }
+
+            boolean engineeringOnly = criteria.contains("engineering only");
+
+            if (engineeringOnly
+                    && !course.contains("engineering")
+                    && !course.contains("b.tech")
+                    && !course.contains("btech")
+                    && !course.contains("b.e")) {
+                match = false;
+                reasons.add("This scholarship appears restricted to engineering.");
+            }
+        }
+
+        // 6. Study year restrictions
+        Integer year = request.getStudyYear();
+
+        if (year != null) {
+            if (year < 1 || year > 8) {
+                match = false;
+                reasons.add("Study year must be between 1 and 8.");
+            } else {
+                Integer requiredYear = findRequiredStudyYear(criteria);
+
+                if (requiredYear != null && !year.equals(requiredYear)) {
+                    match = false;
+                    reasons.add(
+                        "This scholarship appears to require study year "
+                        + requiredYear + "."
+                    );
+                }
+            }
         }
 
         if (reasons.isEmpty()) {
             reasons.add(
-                    "No conflicting rule was detected in the stored criteria. Verify the official requirements.");
+                "No definite mismatch detected. Verify the official eligibility criteria."
+            );
         }
 
         return new EligibilityResult(
-                scholarship.getId(),
-                scholarship.getName(),
-                scholarship.getProvider(),
-                scholarship.getAmount(),
-                scholarship.getDeadline(),
-                match,
-                match
-                        ? "Potential match — verify official criteria"
-                        : "Not matched against the entered details",
-                reasons);
+            scholarship.getId(),
+            scholarship.getName(),
+            scholarship.getProvider(),
+            scholarship.getAmount(),
+            scholarship.getDeadline(),
+            match,
+            match ? "Potential match" : "Not eligible based on detected rules",
+            reasons
+        );
     }
 
-    private String lower(String value) {
-        return Optional.ofNullable(value)
-                .orElse("")
-                .trim()
-                .toLowerCase(Locale.ROOT);
+    private String normalize(String value) {
+        return value == null
+                ? ""
+                : value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private Double findMinimumPercentage(String criteria) {
+        Pattern pattern = Pattern.compile(
+            "(?:minimum|min\\.?|at least|not less than)"
+            + "\\s*(\\d{1,3}(?:\\.\\d+)?)\\s*(?:%|percent)",
+            Pattern.CASE_INSENSITIVE
+        );
+
+        Matcher matcher = pattern.matcher(criteria);
+
+        if (matcher.find()) {
+            double value = Double.parseDouble(matcher.group(1));
+
+            if (value >= 0 && value <= 100) {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private Double findIncomeLimit(String criteria) {
+        Pattern pattern = Pattern.compile(
+            "(?:annual family income|family income|annual income|"
+            + "family's income|income limit|income should not exceed)"
+            + "[^0-9]{0,35}(?:rs\\.?\\s*|inr\\s*|₹\\s*)?"
+            + "([0-9][0-9,]*)",
+            Pattern.CASE_INSENSITIVE
+        );
+
+        Matcher matcher = pattern.matcher(criteria);
+
+        if (matcher.find()) {
+            try {
+                return Double.valueOf(
+                    matcher.group(1).replace(",", "")
+                );
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private Integer findRequiredStudyYear(String criteria) {
+        Pattern pattern = Pattern.compile(
+            "(?:only for|for students in|students studying in|"
+            + "studying in|currently in|pursuing in)"
+            + "\\s*(first|1st|second|2nd|third|3rd|fourth|4th)"
+            + "\\s*(?:year)",
+            Pattern.CASE_INSENSITIVE
+        );
+
+        Matcher matcher = pattern.matcher(criteria);
+
+        if (matcher.find()) {
+            String year = matcher.group(1).toLowerCase(Locale.ROOT);
+
+            return switch (year) {
+                case "first", "1st" -> 1;
+                case "second", "2nd" -> 2;
+                case "third", "3rd" -> 3;
+                case "fourth", "4th" -> 4;
+                default -> null;
+            };
+        }
+
+        return null;
+    }
+
+    private boolean isPostgraduate(String course) {
+        return course.contains("m.tech")
+                || course.contains("mtech")
+                || course.contains("m.e.")
+                || course.contains("mba")
+                || course.contains("mca")
+                || course.contains("m.sc")
+                || course.contains("master");
+    }
+
+    private boolean isUndergraduate(String course) {
+        return course.contains("b.tech")
+                || course.contains("btech")
+                || course.contains("b.e.")
+                || course.contains("b.e ")
+                || course.contains("bachelor")
+                || course.contains("undergraduate")
+                || course.equals("degree");
     }
 
     public static class EligibilityRequest {
@@ -276,14 +419,14 @@ public class EligibilityController {
 
     public static class EligibilityResult {
 
-        private Long scholarshipId;
-        private String scholarshipName;
-        private String provider;
-        private BigDecimal amount;
-        private LocalDate deadline;
-        private boolean potentialMatch;
-        private String result;
-        private List<String> reasons;
+        private final Long scholarshipId;
+        private final String scholarshipName;
+        private final String provider;
+        private final BigDecimal amount;
+        private final LocalDate deadline;
+        private final boolean potentialMatch;
+        private final String result;
+        private final List<String> reasons;
 
         public EligibilityResult(
                 Long scholarshipId,
